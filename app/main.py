@@ -262,7 +262,8 @@ def chat(body: ChatRequest, request: Request):
         })
         pieces, model, fallback = [], None, False
         try:
-            for kind, value in generate_answer_stream(body.message, found, dataset_overview(), history, labels):
+            resolved = plan["query"] if plan["search"] else None
+            for kind, value in generate_answer_stream(body.message, found, dataset_overview(), history, labels, resolved):
                 if kind == "model":
                     model = value
                     trace.mark("first_word")

@@ -24,12 +24,16 @@ Run:
 """
 
 import json
+import os
 import shutil
 import sqlite3
+from functools import cached_property
 from pathlib import Path
 
 import chromadb
+import numpy as np
 from chromadb.config import Settings
+from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 CLEAN_FILE = DATA_DIR / "clean" / "properties.json"
@@ -98,10 +102,59 @@ def embedding_text(record: dict) -> str:
     return f"{text['title']}. {text['details']}. {text['location']}. {text['description']}"[:2000]
 
 
+class LeanMiniLM(ONNXMiniLM_L6_V2):
+    """Chroma's default embedding model (all-MiniLM-L6-v2), tuned for small servers.
+
+    Same model and same vectors; two settings differ from Chroma's defaults:
+      * ONNX Runtime uses EMBEDDING_THREADS threads (default 1). By default it
+        starts one thread per CPU core it can see; on a host that gives us only
+        a slice of one CPU (Render's free tier: 0.1), those threads mostly wait
+        for each other and a search took ~6 seconds.
+      * Text is padded only to the longest text in the batch instead of always
+        to 256 tokens, so a short question costs a few tokens, not 256. The
+        model's averaging step ignores padding, so the vectors don't change.
+    """
+
+    @cached_property
+    def tokenizer(self):
+        tokenizer = super().tokenizer
+        tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")  # pad to the longest, not to 256
+        return tokenizer
+
+    def _forward(self, documents: list[str], batch_size: int = 32) -> np.ndarray:
+        """Embed texts: tokenize a batch together, run the model, average the word vectors."""
+        all_embeddings = []
+        for start in range(0, len(documents), batch_size):
+            encoded = self.tokenizer.encode_batch(documents[start:start + batch_size])
+            ids = np.array([e.ids for e in encoded], dtype=np.int64)
+            mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
+            hidden = self.model.run(None, {"input_ids": ids, "attention_mask": mask,
+                                           "token_type_ids": np.zeros_like(ids)})[0]
+            # Mean of the word vectors, ignoring padding (same as Chroma's own code).
+            pooled = (hidden * mask[..., None]).sum(axis=1) / np.clip(mask.sum(axis=1, keepdims=True), 1e-9, None)
+            all_embeddings.append(self._normalize(pooled).astype(np.float32))
+        return np.concatenate(all_embeddings)
+
+    @cached_property
+    def model(self):
+        options = self.ort.SessionOptions()
+        options.log_severity_level = 3  # errors only
+        options.graph_optimization_level = self.ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        options.intra_op_num_threads = int(os.getenv("EMBEDDING_THREADS", "1"))
+        options.inter_op_num_threads = 1
+        return self.ort.InferenceSession(
+            os.path.join(self.DOWNLOAD_PATH, self.EXTRACTED_FOLDER_NAME, "model.onnx"),
+            providers=["CPUExecutionProvider"],
+            sess_options=options,
+        )
+
+
 def chroma_collection():
     """Open the Chroma collection (cosine distance: 0 = same meaning, 2 = opposite)."""
     client = chromadb.PersistentClient(path=str(CHROMA_DIR), settings=Settings(anonymized_telemetry=False))
-    return client.get_or_create_collection(CHROMA_COLLECTION, metadata={"hnsw:space": "cosine"})
+    return client.get_or_create_collection(
+        CHROMA_COLLECTION, metadata={"hnsw:space": "cosine"}, embedding_function=LeanMiniLM(),
+    )
 
 
 def build_vector_index(records: list[dict]) -> None:
