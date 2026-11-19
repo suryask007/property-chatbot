@@ -27,7 +27,7 @@ import json
 import os
 import shutil
 import sqlite3
-from functools import cached_property
+from functools import cached_property, lru_cache
 from pathlib import Path
 
 import chromadb
@@ -149,11 +149,21 @@ class LeanMiniLM(ONNXMiniLM_L6_V2):
         )
 
 
+@lru_cache(maxsize=1)
+def embedding_function() -> LeanMiniLM:
+    """One shared copy of the embedding model for search and the answer cache.
+
+    Each copy holds its own model in memory (~100 MB); two copies pushed the app
+    past the 512 MB limit of Render's free tier.
+    """
+    return LeanMiniLM()
+
+
 def chroma_collection():
     """Open the Chroma collection (cosine distance: 0 = same meaning, 2 = opposite)."""
     client = chromadb.PersistentClient(path=str(CHROMA_DIR), settings=Settings(anonymized_telemetry=False))
     return client.get_or_create_collection(
-        CHROMA_COLLECTION, metadata={"hnsw:space": "cosine"}, embedding_function=LeanMiniLM(),
+        CHROMA_COLLECTION, metadata={"hnsw:space": "cosine"}, embedding_function=embedding_function(),
     )
 
 

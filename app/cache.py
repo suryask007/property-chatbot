@@ -30,12 +30,11 @@ import json
 import re
 import time
 from collections import OrderedDict
-from functools import lru_cache
 from threading import Lock
 
 import numpy as np
 
-from app.database import LeanMiniLM
+from app.database import embedding_function
 
 TTL = 6 * 60 * 60     # seconds an answer stays valid
 MAX_ENTRIES = 500
@@ -58,14 +57,9 @@ def fingerprint(found: dict) -> str:
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
 
 
-@lru_cache(maxsize=1)
-def embedder() -> LeanMiniLM:
-    return LeanMiniLM()
-
-
 def embed(text: str) -> np.ndarray:
     """Turn text into a meaning vector (length 1) with the same model the search uses."""
-    return np.array(embedder()([text])[0])
+    return np.array(embedding_function()([text])[0])
 
 
 class AnswerCache:
