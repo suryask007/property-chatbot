@@ -147,10 +147,11 @@ function showCards(el, properties) {
   el.appendChild(cards);
 }
 
-function showDetails(el, { search_query, total_matches, model, request_id }) {
+function showDetails(el, { search_query, total_matches, model, request_id, cached }) {
   const details = [];
   if (search_query) details.push(`Searched for “${search_query}”: ${total_matches} matches`);
-  if (model) details.push(`answered by ${model}`);
+  if (cached) details.push("instant answer from cache");
+  else if (model) details.push(`answered by ${model}`);
   if (request_id) details.push(`ref ${request_id}`); // matches the audit record on the server
   if (!details.length) return;
   const meta = document.createElement("p");
@@ -187,7 +188,8 @@ function showError(el, message) {
 }
 
 // The server streams one JSON object per line (see app/main.py):
-//   {"type": "meta"} cards + search details, {"type": "text"} answer pieces, {"type": "done"}
+//   {"type": "meta"} cards + search details, {"type": "text"} answer pieces,
+//   {"type": "replace"} corrected full answer, {"type": "done"}
 async function readAnswerStream(response, el) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -212,8 +214,11 @@ async function readAnswerStream(response, el) {
         answer += event.text;
         showText(el, answer);
         scrollToBottom();
+      } else if (event.type === "replace") {
+        answer = event.text; // a guardrail changed the answer (e.g. removed an untrusted link)
+        showText(el, answer);
       } else if (event.type === "done") {
-        showDetails(el, { ...meta, model: event.model });
+        showDetails(el, { ...meta, model: event.model, cached: event.cached });
       }
     }
   }

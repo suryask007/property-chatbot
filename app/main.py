@@ -10,12 +10,15 @@ Endpoints
   GET    /health       used by the hosting platform to check the app is running
 
 Flow of one chat message:
-  1. load the conversation so far             (app/memory.py)
-  2. plan: search needed? standalone query?   (app/llm.py, plan_search)
-  3. hybrid search: filters + keywords + Chroma (app/search.py)
-  4. stream the answer as it is written       (app/llm.py, generate_answer_stream)
-  5. remember the message, answer and cards   (app/memory.py)
-  6. write an audit record of every step      (app/audit.py; AI calls also go to Langfuse)
+  1. input guardrails: block prompt injection, hide personal data  (app/guardrails.py)
+  2. load the conversation so far             (app/memory.py)
+  3. plan: search needed? standalone query?   (app/llm.py, plan_search)
+  4. hybrid search: filters + keywords + Chroma (app/search.py)
+  5. answer cache: same question + same results -> saved answer  (app/cache.py)
+  6. otherwise stream the answer as it is written  (app/llm.py, generate_answer_stream)
+  7. output guardrails: only trusted links, no instruction leaks  (app/guardrails.py)
+  8. remember the message, answer and cards   (app/memory.py)
+  9. write an audit record of every step      (app/audit.py; AI calls also go to Langfuse)
 
 Run locally:
     uv run uvicorn app.main:app --reload
@@ -40,6 +43,8 @@ from pydantic import BaseModel, Field
 load_dotenv()  # reads OPENROUTER_API_KEY from .env when running locally
 
 from app import audit  # noqa: E402
+from app.cache import AnswerCache  # noqa: E402
+from app.guardrails import check_input, check_output  # noqa: E402
 from app.llm import generate_answer_stream, plan_search  # noqa: E402  (needs the key loaded first)
 from app.memory import ConversationStore, for_model  # noqa: E402
 from app.search import dataset_overview, get_db, get_vectors, keywords, parse_filters, search  # noqa: E402
@@ -60,6 +65,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="DarGlobal & Wasalt Property Chatbot", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 memory = ConversationStore()
+answer_cache = AnswerCache()
 
 
 # ------------------------------------------------------------ request shapes
@@ -187,7 +193,7 @@ def traces(request: Request, limit: int = 50, session_id: str | None = None):
     """Recent audit records, newest first. Requires the ADMIN_TOKEN."""
     check_admin(request)
     records = [r for r in reversed(audit.recent) if not session_id or r["session_id"] == session_id]
-    return {"traces": records[:limit]}
+    return {"cache": answer_cache.stats(), "traces": records[:limit]}
 
 
 @app.get("/api/traces/{request_id}")
@@ -208,11 +214,48 @@ def check_admin(request: Request) -> None:
         raise HTTPException(401, "Missing or wrong admin token")
 
 
+def stream_response(events, request_id: str) -> StreamingResponse:
+    """Send events as one JSON object per line, as they are produced."""
+    return StreamingResponse(
+        (as_line(event) for event in events),
+        media_type="application/x-ndjson",
+        headers={
+            "X-Request-ID": request_id,
+            # Ask proxies (e.g. Render's) to pass each piece on immediately.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/api/chat")
 def chat(body: ChatRequest, request: Request):
+    """Answer one message. The response streams events, one JSON object per line:
+      {"type": "meta"}     search query, number of matches, property cards, request id
+      {"type": "text"}     a piece of the answer (many of these)
+      {"type": "replace"}  the full answer again, if an output guardrail changed it
+      {"type": "done"}     which model answered, and whether it came from the cache
+    """
     check_rate_limit(client_ip(request))
-    trace = audit.Trace(body.session_id, body.message)
+
+    # Guardrails on the way in: block prompt injection, hide personal data.
+    message, input_guards, blocked_reply = check_input(body.message)
+    trace = audit.Trace(body.session_id, message)  # only the cleaned message is logged
+    trace.record["guardrails"] = list(input_guards)
     labels = {"request_id": trace.request_id, "session_id": body.session_id}  # for Langfuse
+
+    if blocked_reply:
+        def refusal():
+            yield {"type": "meta", "request_id": trace.request_id, "search_query": None,
+                   "total_matches": 0, "properties": []}
+            yield {"type": "text", "text": blocked_reply}
+            memory.add(body.session_id, "user", message)
+            memory.add(body.session_id, "assistant", blocked_reply)
+            trace.record["answer"] = {"model": None, "fallback": False, "cached": False, "text": blocked_reply}
+            trace.finish()
+            yield {"type": "done", "model": None, "cached": False}
+        return stream_response(refusal(), trace.request_id)
+
     turns = memory.turns(body.session_id)
     history = for_model(turns)
 
@@ -222,15 +265,15 @@ def chat(body: ChatRequest, request: Request):
     started = trace.elapsed_ms()
     planned_by = "rules"
     if not turns:
-        plan = plan_with_rules(body.message, turns)
+        plan = plan_with_rules(message, turns)
     else:
         try:
-            plan = plan_search(body.message, history, labels)
+            plan = plan_search(message, history, labels)
             planned_by = "ai"
         except RuntimeError as error:
             log.warning(f"planner unavailable, using rules: {error}")
             trace.error("plan", str(error))
-            plan = plan_with_rules(body.message, turns)
+            plan = plan_with_rules(message, turns)
     trace.timing("plan", started)
     trace.record["plan"] = {"by": planned_by, **plan}
 
@@ -248,55 +291,67 @@ def chat(body: ChatRequest, request: Request):
             "result_ids": [p["id"] for p in found["results"]],
         }
 
-    # Step 3: stream the answer. The response is one JSON object per line:
-    #   {"type": "meta", ...}    search query, number of matches, property cards, request id
-    #   {"type": "text", ...}    a piece of the answer (many of these)
-    #   {"type": "done", ...}    which model answered
+    # When the AI planner rewrote a follow-up ("tell me more about the second one"
+    # -> "Urban Oasis by Missoni"), answer the rewritten question: "the second one"
+    # could point at a different property in the new search results.
+    question = plan["query"] if planned_by == "ai" and plan["search"] else message
+
+    # Links the answer may contain: properties found now or shown earlier in this chat.
+    allowed_urls = {p["url"] for p in (found["results"] if found else [])}
+    allowed_urls |= {card["url"] for turn in turns for card in turn["cards"]}
+
     def events():
-        yield as_line({
-            "type": "meta",
-            "request_id": trace.request_id,
-            "search_query": plan["query"] if plan["search"] else None,
-            "total_matches": found["total_matches"] if found else 0,
-            "properties": cards,
-        })
-        pieces, model, fallback = [], None, False
-        try:
-            # When the AI planner rewrote a follow-up ("tell me more about the second one"
-            # -> "Urban Oasis by Missoni"), answer the rewritten question: "the second one"
-            # could point at a different property in the new search results.
-            question = plan["query"] if planned_by == "ai" and plan["search"] else body.message
-            for kind, value in generate_answer_stream(question, found, dataset_overview(), history, labels):
-                if kind == "model":
-                    model = value
-                    trace.mark("first_word")
-                else:
-                    pieces.append(value)
-                    yield as_line({"type": "text", "text": value})
-        except RuntimeError as error:
-            log.warning(str(error))
-            trace.error("answer", str(error))
-            pieces, fallback = [fallback_answer(found)], True
-            yield as_line({"type": "text", "text": pieces[0]})
+        yield {"type": "meta", "request_id": trace.request_id,
+               "search_query": plan["query"] if plan["search"] else None,
+               "total_matches": found["total_matches"] if found else 0, "properties": cards}
+
+        # Step 3a: the same question found the same properties before? Reuse that answer.
+        cached = answer_cache.get(question, found) if found else None
+        if cached:
+            trace.mark("first_word")
+            answer, model, fallback = cached["answer"], cached["model"], False
+            yield {"type": "text", "text": answer}
+        else:
+            # Step 3b: stream a new answer from the AI.
+            pieces, model, fallback = [], None, False
+            try:
+                for kind, value in generate_answer_stream(question, found, dataset_overview(), history, labels):
+                    if kind == "model":
+                        model = value
+                        trace.mark("first_word")
+                    elif kind == "usage":
+                        trace.record["tokens"] = value
+                    else:
+                        pieces.append(value)
+                        yield {"type": "text", "text": value}
+            except RuntimeError as error:
+                log.warning(str(error))
+                trace.error("answer", str(error))
+                pieces, fallback = [fallback_answer(found)], True
+                yield {"type": "text", "text": pieces[0]}
+            answer = re.sub(r"<think>.*?</think>", "", "".join(pieces), flags=re.S).strip()
+
+            # Guardrails on the way out: only trusted links, no instruction leaks.
+            safe, output_guards = check_output(answer, allowed_urls)
+            trace.record["guardrails"] += output_guards
+            if safe != answer:
+                answer = safe
+                yield {"type": "replace", "text": answer}
+            # Cache the (cleaned) answer, unless it was a backup reply or a blocked leak.
+            if found and not fallback and "instruction_leak_blocked" not in output_guards:
+                answer_cache.put(question, found, answer, model)
 
         # Step 4: remember the exchange and write the audit record.
-        answer = re.sub(r"<think>.*?</think>", "", "".join(pieces), flags=re.S).strip()
-        memory.add(body.session_id, "user", body.message)
+        memory.add(body.session_id, "user", message)
         memory.add(body.session_id, "assistant", answer, cards)
-        trace.record["answer"] = {"model": model, "fallback": fallback, "text": answer}
+        trace.record["answer"] = {
+            "model": model, "fallback": fallback, "cached": bool(cached), "text": answer,
+            **({"cached_question": cached["question"], "similarity": cached["similarity"]} if cached else {}),
+        }
         trace.finish()
-        yield as_line({"type": "done", "model": model})
+        yield {"type": "done", "model": model, "cached": bool(cached)}
 
-    return StreamingResponse(
-        events(),
-        media_type="application/x-ndjson",
-        headers={
-            "X-Request-ID": trace.request_id,
-            # Ask proxies (e.g. Hugging Face's) to pass each piece on immediately.
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return stream_response(events(), trace.request_id)
 
 
 def as_line(event: dict) -> str:
