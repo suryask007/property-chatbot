@@ -262,8 +262,11 @@ def chat(body: ChatRequest, request: Request):
         })
         pieces, model, fallback = [], None, False
         try:
-            resolved = plan["query"] if plan["search"] else None
-            for kind, value in generate_answer_stream(body.message, found, dataset_overview(), history, labels, resolved):
+            # When the AI planner rewrote a follow-up ("tell me more about the second one"
+            # -> "Urban Oasis by Missoni"), answer the rewritten question: "the second one"
+            # could point at a different property in the new search results.
+            question = plan["query"] if planned_by == "ai" and plan["search"] else body.message
+            for kind, value in generate_answer_stream(question, found, dataset_overview(), history, labels):
                 if kind == "model":
                     model = value
                     trace.mark("first_word")

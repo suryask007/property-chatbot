@@ -267,24 +267,17 @@ def plan_search(message: str, history: list[dict], trace: dict | None = None) ->
     return {"search": bool(plan["search"]), "query": str(plan.get("query") or message).strip()}
 
 
-def generate_answer_stream(question: str, found: dict | None, overview: str, history: list[dict],
-                           trace: dict | None = None, resolved: str | None = None) -> Iterator[tuple[str, str]]:
+def generate_answer_stream(question: str, found: dict | None, overview: str,
+                           history: list[dict], trace: dict | None = None) -> Iterator[tuple[str, str]]:
     """Step 2: write the reply, streamed.
-
-    `resolved` is the planner's standalone version of a follow-up ("tell me more
-    about the second one" -> "Urban Oasis by Missoni"). It is passed along because
-    "the second one" in the new search results may be a different property.
 
     Yields ("model", name) once, then ("text", piece) for each piece of the answer.
     Raises RuntimeError if no model could start answering.
     """
-    request = f"Question: {question}"
-    if resolved and resolved.strip().lower() != question.strip().lower():
-        request += f"\n(In this conversation the user means: {resolved}. Answer about that.)"
     messages = [
         {"role": "system", "content": INSTRUCTIONS.format(overview=overview)},
         *history,  # the recent conversation, for follow-up questions
-        {"role": "user", "content": f"{format_search(found)}\n\n{request}"},
+        {"role": "user", "content": f"{format_search(found)}\n\nQuestion: {question}"},
     ]
     started = False
     try:
