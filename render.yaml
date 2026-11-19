@@ -1,0 +1,24 @@
+# Module 7 - Render deployment (free Docker web service).
+#
+# In the Render dashboard: New > Blueprint > pick this GitHub repo. Render
+# builds the Dockerfile and asks for the secret values marked "sync: false".
+# Render sets PORT itself; the Dockerfile's start command uses it.
+services:
+  - type: web
+    name: property-chatbot
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_BASE_URL
+        sync: false

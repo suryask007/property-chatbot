@@ -1,0 +1,13 @@
+# Only app/, data/properties.db, pyproject.toml and uv.lock go into the image.
+.env
+.git
+.venv
+.playwright-mcp
+__pycache__
+*.pyc
+scraper
+processing
+data/raw
+data/clean
+data/audit
+deploy

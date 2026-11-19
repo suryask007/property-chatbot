@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Property assistant · DarGlobal & Wasalt</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 28V14l8-6 8 6v14M20 28V9l8-5v24M2 28h28' fill='none' stroke='%230f4c45' stroke-width='2.6' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M4 28V14l8-6 8 6v14M20 28V9l8-5v24M2 28h28" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+      </svg>
+      <div>
+        <h1>Property assistant</h1>
+        <p>Answers from DarGlobal projects and Wasalt listings</p>
+      </div>
+      <button id="new-chat" class="new-chat" type="button">New chat</button>
+    </div>
+  </header>
+
+  <main id="chat" class="chat" aria-live="polite">
+    <section id="welcome" class="welcome">
+      <h2>Ask about homes, villas and developments</h2>
+      <p>
+        I know <strong>38 DarGlobal luxury projects</strong> in the UAE, Oman, Saudi Arabia, Qatar,
+        Spain and the UK, and <strong>hundreds of Wasalt listings</strong> for sale and rent across Saudi Arabia.
+      </p>
+      <div class="starters" id="starters">
+        <button type="button">3 bedroom apartments for rent in Riyadh under 60k</button>
+        <button type="button">Which DarGlobal projects are in Dubai?</button>
+        <button type="button">Cheapest villas for sale in Jeddah</button>
+        <button type="button">Do any DarGlobal projects offer a Golden Visa?</button>
+        <button type="button">Beachfront projects with branded interiors</button>
+      </div>
+    </section>
+  </main>
+
+  <form id="composer" class="composer">
+    <label for="message" class="visually-hidden">Your question</label>
+    <textarea id="message" rows="1" maxlength="500" placeholder="Ask about a city, budget or project…" required></textarea>
+    <button id="send" type="submit">Send</button>
+  </form>
+  <p class="footnote">Data scraped from public pages of darglobal.co.uk and wasalt.sa. Always confirm details on the original listing.</p>
+
+  <template id="card-template">
+    <a class="card" target="_blank" rel="noopener">
+      <div class="card-image"><img alt="" loading="lazy"></div>
+      <div class="card-body">
+        <span class="card-source"></span>
+        <h3 class="card-title"></h3>
+        <p class="card-location"></p>
+        <p class="card-price"></p>
+        <p class="card-facts"></p>
+      </div>
+    </a>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
